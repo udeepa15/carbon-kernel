@@ -1,0 +1,153 @@
+diff --git a/core/org.wso2.carbon.core/src/main/java/org/wso2/carbon/core/util/KeyStoreManager.java b/core/org.wso2.carbon.core/src/main/java/org/wso2/carbon/core/util/KeyStoreManager.java
+index 629861676207..2bb644ce1cc0 100644
+--- a/core/org.wso2.carbon.core/src/main/java/org/wso2/carbon/core/util/KeyStoreManager.java
++++ b/core/org.wso2.carbon.core/src/main/java/org/wso2/carbon/core/util/KeyStoreManager.java
+@@ -33,11 +33,20 @@
+ import org.wso2.carbon.utils.CarbonUtils;
+ import org.wso2.carbon.utils.multitenancy.MultitenantConstants;
+ 
+-import java.io.*;
++import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
++import java.io.InputStream;
++import java.io.IOException;
+ import java.security.Key;
+ import java.security.KeyStore;
+ import java.security.PrivateKey;
+ import java.security.PublicKey;
++import java.security.KeyStoreException;
++import java.security.NoSuchAlgorithmException;
++import java.security.UnrecoverableKeyException;
+ import java.security.cert.CertificateEncodingException;
+ import java.security.cert.X509Certificate;
+ import java.util.Date;
+@@ -551,6 +560,26 @@ public PrivateKey getDefaultPrivateKey() throws Exception {
+                 "available only for the super tenant.");
+     }
+ 
++    /**
++     * Get the default private key, only allowed for tenant -1234
++     *
++     * @return Private key
++     * @throws CarbonException, UnrecoverableKeyException, KeyStoreException, NoSuchAlgorithmException
++     *         Exceptions while retrieving private key
++     */
++    public PrivateKey getDefaultPrivateKey(String alias) throws CarbonException,
++            UnrecoverableKeyException, KeyStoreException, NoSuchAlgorithmException {
++
++        if (tenantId == MultitenantConstants.SUPER_TENANT_ID) {
++            ServerConfigurationService config = this.getServerConfigService();
++            String password = config
++                    .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_PASSWORD);
++            return (PrivateKey) primaryKeyStore.getKey(alias, password.toCharArray());
++        }
++        throw new CarbonException("Permission denied for accessing primary key store. The primary key store is " +
++                "available only for the super tenant.");
++    }
++
+     /**
+      * Get default pub. key
+      *
+@@ -562,7 +591,7 @@ public PublicKey getDefaultPublicKey() throws Exception {
+             ServerConfigurationService config = this.getServerConfigService();
+             String alias = config
+                     .getFirstProperty(RegistryResources.SecurityManagement.SERVER_PRIMARY_KEYSTORE_KEY_ALIAS);
+-            return (PublicKey) primaryKeyStore.getCertificate(alias).getPublicKey();
++            return primaryKeyStore.getCertificate(alias).getPublicKey();
+         }
+         throw new CarbonException("Permission denied for accessing primary key store. The primary key store is " +
+                 "available only for the super tenant.");
+diff --git a/core/org.wso2.carbon.core/src/main/java/org/wso2/carbon/core/util/KeyStoreUtil.java b/core/org.wso2.carbon.core/src/main/java/org/wso2/carbon/core/util/KeyStoreUtil.java
+index af028269c241..12271efa1f6a 100644
+--- a/core/org.wso2.carbon.core/src/main/java/org/wso2/carbon/core/util/KeyStoreUtil.java
++++ b/core/org.wso2.carbon.core/src/main/java/org/wso2/carbon/core/util/KeyStoreUtil.java
+@@ -19,15 +19,19 @@
+ 
+ import org.apache.axis2.AxisFault;
+ import org.apache.commons.lang3.StringUtils;
++import org.wso2.carbon.CarbonException;
+ import org.wso2.carbon.base.api.ServerConfigurationService;
+ import org.wso2.carbon.core.RegistryResources;
+ import org.wso2.carbon.core.internal.CarbonCoreDataHolder;
+ 
+ import java.io.File;
+ import java.security.KeyStore;
++import java.security.KeyStoreException;
+ import java.security.cert.Certificate;
+ import java.util.Enumeration;
+ 
++import static org.wso2.carbon.utils.multitenancy.MultitenantConstants.TENANT_EC_KEY_SUFFIX;
++
+ public class KeyStoreUtil {
+ 
+     /**
+@@ -37,11 +41,12 @@ public class KeyStoreUtil {
+      * @return
+      */
+     public static String getPrivateKeyAlias(KeyStore store) throws Exception {
++
+         String alias = null;
+         Enumeration<String> enums = store.aliases();
+-        while(enums.hasMoreElements()){
++        while (enums.hasMoreElements()) {
+             String name = enums.nextElement();
+-            if(store.isKeyEntry(name)){
++            if (store.isKeyEntry(name) && !name.endsWith(TENANT_EC_KEY_SUFFIX)) {
+                 alias = name;
+                 break;
+             }
+@@ -127,4 +132,38 @@ public static boolean isTrustStore(String fileName) {
+                 : new File(trustStorePath).getName();
+         return StringUtils.equals(trustStoreName, fileName);
+     }
++
++    /**
++     * Get tenant EC Key Alias
++     *
++     * @return Tenant EC Key Alias
++     * @throws CarbonException Exception Carbon Exception for tenants other than tenant -1234
++     */
++    public static String getTenantECKeyAlias(String tenantDomain) throws CarbonException {
++
++        if (StringUtils.isBlank(tenantDomain)) {
++            throw new CarbonException("Tenant domain must not be empty.");
++        } else {
++            return tenantDomain +  TENANT_EC_KEY_SUFFIX;
++        }
++    }
++
++    /**
++     * Get the primary key alias, only allowed for tenant -1234
++     *
++     * @param keyStore Primary Key Store
++     * @return Primary Key Alias
++     * @throws KeyStoreException Exception for invalid primary key alias
++     */
++    public static String getPrimaryKeyAlias(KeyStore keyStore) throws KeyStoreException {
++
++        ServerConfigurationService config = CarbonCoreDataHolder.getInstance().getServerConfigurationService();
++        String alias = StringUtils.trim(config.getFirstProperty(RegistryResources.SecurityManagement
++                .SERVER_PRIMARY_KEYSTORE_KEY_ALIAS));
++        if (StringUtils.isBlank(alias) || !keyStore.isKeyEntry(alias)) {
++            throw new IllegalStateException("Configured primary keystore key alias is invalid " +
++                    "or does not exist as a key entry");
++        }
++        return alias;
++    }
+ }
+diff --git a/core/org.wso2.carbon.utils/src/main/java/org/wso2/carbon/utils/multitenancy/MultitenantConstants.java b/core/org.wso2.carbon.utils/src/main/java/org/wso2/carbon/utils/multitenancy/MultitenantConstants.java
+index 6fe1ac61dfe9..65a86fc3205a 100755
+--- a/core/org.wso2.carbon.utils/src/main/java/org/wso2/carbon/utils/multitenancy/MultitenantConstants.java
++++ b/core/org.wso2.carbon.utils/src/main/java/org/wso2/carbon/utils/multitenancy/MultitenantConstants.java
+@@ -37,6 +37,8 @@ public class MultitenantConstants {
+     public static final String TENANT_DOMAIN_HEADER_NAMESPACE = "http://cloud.wso2.com/";
+     public static final String TENANT_DOMAIN_HEADER_NAME = "TenantDomain";
+     public static final String SUPER_TENANT_DOMAIN_NAME = "carbon.super";
++    // Introduced for tenant ec key pair generation
++    public static final String TENANT_EC_KEY_SUFFIX = "_ec";
+     public static final int INVALID_TENANT_ID = -1;
+ 
+     public static final String REQUIRE_SUPER_TENANT = "require-super-tenant";
